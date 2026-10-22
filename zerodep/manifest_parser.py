@@ -33,8 +33,10 @@ PACKAGE_ALIAS_MAP: Dict[str, str] = {
     # Confirmed stable mappings
     "scikit-learn":         "sklearn",
     "pyyaml":               "yaml",
+    "yaml":                 "yaml",
     "pillow":               "PIL",
     "python-dotenv":        "dotenv",
+    "dotenv":               "dotenv",
     "beautifulsoup4":       "bs4",
     "opencv-python":        "cv2",
     "opencv-python-headless": "cv2",
@@ -59,8 +61,13 @@ PACKAGE_ALIAS_MAP: Dict[str, str] = {
     "wheel":                "wheel",
     "tomli":                "tomli",
     "tomli-w":              "tomli_w",
-    # Uncertain — keep but mark clearly
-    # "msgpack-python": "msgpack",  # upstream renamed to just "msgpack"
+    "flask-cors":           "flask_cors",
+    "python-multipart":     "multipart",
+    "torchvision":          "torchvision",
+    "ultralytics":          "ultralytics",
+    "poliastro":            "poliastro",
+    "sgp4":                 "sgp4",
+    "astropy":              "astropy",
 }
 
 # Dependency group names that indicate dev/test scope
@@ -85,6 +92,8 @@ class ManifestDependency:
 class ManifestParseResult:
     dependencies: List[ManifestDependency] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    manifest_files_found: List[str] = field(default_factory=list)
+
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -238,28 +247,143 @@ _DEV_REQ_PATTERNS = ("requirements-dev.txt", "requirements-test.txt",
 
 
 def parse_manifests(root_path: Path) -> ManifestParseResult:
-    """Discover and parse all manifest files in root_path."""
+    """Discover and parse all manifest files in root_path and immediate project subfolders."""
     result = ManifestParseResult()
     seen: Dict[str, ManifestDependency] = {}  # dedup by (name, scope)
+    manifest_files_found: List[str] = []
 
-    def _add(dep: ManifestDependency) -> None:
+    def _add(dep: ManifestDependency, rel_path: str) -> None:
         key = f"{dep.name}::{dep.scope}"
         if key not in seen:
             seen[key] = dep
+        if rel_path not in manifest_files_found:
+            manifest_files_found.append(rel_path)
 
-    # 1. pyproject.toml
-    for dep in parse_pyproject_toml(root_path / "pyproject.toml"):
-        _add(dep)
+    # Search candidates in root and subdirectories (excluding virtual environments, git, caches)
+    skip_dirs = {".git", ".tox", ".pytest_cache", "venv", ".venv", "env", "node_modules", "site-packages", "__pycache__"}
 
-    # 2. requirements.txt (runtime)
-    for dep in parse_requirements_txt(root_path / "requirements.txt", scope="runtime"):
-        _add(dep)
+    def _should_skip_dir(p: Path) -> bool:
+        return any(part in skip_dirs for part in p.parts)
 
-    # 3. Dev/test requirements
-    for pattern in _DEV_REQ_PATTERNS:
-        scope = "test" if "test" in pattern else "dev"
-        for dep in parse_requirements_txt(root_path / pattern, scope=scope):
-            _add(dep)
+    _SUPPORTED_MANIFESTS = ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg", "Pipfile") + _DEV_REQ_PATTERNS
+
+    candidate_files = []
+    # 1. Direct root candidates
+    for name in _SUPPORTED_MANIFESTS:
+        target = root_path / name
+        if target.is_file():
+            candidate_files.append(target)
+
+    # 2. Subdirectory candidates (e.g. backend/requirements.txt, src/requirements.txt)
+    for p in root_path.glob("*/*"):
+        if p.is_file() and not _should_skip_dir(p.parent):
+            if p.name in _SUPPORTED_MANIFESTS:
+                if p not in candidate_files:
+                    candidate_files.append(p)
+
+    # 3. Parse discovered manifests
+    for mf in candidate_files:
+        rel = str(mf.relative_to(root_path))
+        if mf.name == "pyproject.toml":
+            parsed = parse_pyproject_toml(mf)
+            if parsed:
+                for dep in parsed:
+                    _add(dep, rel)
+            else:
+                if rel not in manifest_files_found:
+                    manifest_files_found.append(rel)
+        elif mf.name.endswith(".txt"):
+            scope = "test" if "test" in mf.name else ("dev" if "dev" in mf.name else "runtime")
+            parsed = parse_requirements_txt(mf, scope=scope)
+            if parsed:
+                for dep in parsed:
+                    _add(dep, rel)
+            else:
+                if rel not in manifest_files_found:
+                    manifest_files_found.append(rel)
+        elif mf.name == "setup.py":
+            # Simple static extraction of install_requires
+            if rel not in manifest_files_found:
+                manifest_files_found.append(rel)
+            try:
+                content = mf.read_text(encoding="utf-8", errors="ignore")
+                match = re.search(r"install_requires\s*=\s*\[(.*?)\]", content, re.DOTALL)
+                if match:
+                    items = re.findall(r"['\"]([^'\"]+)['\"]", match.group(1))
+                    for item in items:
+                        pkg, imp = normalize_package_name(item)
+                        if pkg:
+                            dep = ManifestDependency(
+                                name=pkg.lower(),
+                                import_name=imp,
+                                source_file=mf.name,
+                                raw_spec=item,
+                                scope="runtime",
+                            )
+                            _add(dep, rel)
+            except Exception:
+                pass
+        elif mf.name == "setup.cfg":
+            if rel not in manifest_files_found:
+                manifest_files_found.append(rel)
+            try:
+                import configparser
+                cfg = configparser.ConfigParser()
+                cfg.read(str(mf), encoding="utf-8")
+                raw_install = cfg.get("options", "install_requires", fallback="")
+                for line in raw_install.splitlines():
+                    raw = line.strip()
+                    if raw and not raw.startswith("#"):
+                        pkg, imp = normalize_package_name(raw)
+                        if pkg:
+                            dep = ManifestDependency(
+                                name=pkg.lower(),
+                                import_name=imp,
+                                source_file=mf.name,
+                                raw_spec=raw,
+                                scope="runtime",
+                            )
+                            _add(dep, rel)
+            except Exception:
+                pass
+        elif mf.name == "Pipfile":
+            if rel not in manifest_files_found:
+                manifest_files_found.append(rel)
+            try:
+                content = mf.read_text(encoding="utf-8", errors="ignore")
+                in_packages = False
+                in_dev_packages = False
+                for line in content.splitlines():
+                    line_clean = line.strip()
+                    if line_clean.startswith("[packages]"):
+                        in_packages = True
+                        in_dev_packages = False
+                        continue
+                    elif line_clean.startswith("[dev-packages]"):
+                        in_packages = False
+                        in_dev_packages = True
+                        continue
+                    elif line_clean.startswith("["):
+                        in_packages = False
+                        in_dev_packages = False
+                        continue
+                    if (in_packages or in_dev_packages) and "=" in line_clean and not line_clean.startswith("#"):
+                        pkg_raw = line_clean.split("=")[0].strip().strip('"').strip("'")
+                        if pkg_raw:
+                            pkg, imp = normalize_package_name(pkg_raw)
+                            if pkg:
+                                dep = ManifestDependency(
+                                    name=pkg.lower(),
+                                    import_name=imp,
+                                    source_file=mf.name,
+                                    raw_spec=line_clean,
+                                    scope="dev" if in_dev_packages else "runtime",
+                                )
+                                _add(dep, rel)
+            except Exception:
+                pass
 
     result.dependencies = list(seen.values())
+    result.manifest_files_found = manifest_files_found
     return result
+
