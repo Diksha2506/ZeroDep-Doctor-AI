@@ -1,0 +1,11 @@
+[tool.poetry]
+name = "data-pipeline"
+version = "1.0.0"
+description = "Medium ETL Data Pipeline"
+
+[tool.poetry.dependencies]
+python = ">=3.11"
+python-dotenv = "^1.0.0"
+pytz = "^2023.3"
+pandas = "^2.0.0"
+colorama = "^0.4.6"  # Unused declared dependency

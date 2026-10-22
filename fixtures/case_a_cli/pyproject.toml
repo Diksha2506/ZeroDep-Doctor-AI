@@ -1,0 +1,10 @@
+[tool.poetry]
+name = "backup-cli"
+version = "0.1.0"
+description = "Simple backup CLI utility"
+
+[tool.poetry.dependencies]
+python = ">=3.9"
+requests = ">=2.28"
+click = ">=8.0"
+loguru = ">=0.6"
