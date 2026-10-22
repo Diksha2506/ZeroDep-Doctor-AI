@@ -67,6 +67,10 @@ class ZeroDepGraph:
     def edge_count(self) -> int:
         return sum(len(v) for v in self._adj.values())
 
+    @property
+    def num_edges(self) -> int:
+        return self.edge_count()
+
     # ──────────────────────────────────────────
     # Traversals
     # ──────────────────────────────────────────
@@ -284,3 +288,60 @@ class ZeroDepGraph:
                 if depth[u] + 1 > depth[v]:
                     depth[v] = depth[u] + 1
         return max(depth.values()) if depth else 0
+
+    # ──────────────────────────────────────────
+    # Graphify structural integration
+    # ──────────────────────────────────────────
+
+    @classmethod
+    def from_graphify_data(cls, data: dict) -> "ZeroDepGraph":
+        """
+        Build or enhance a ZeroDepGraph using actual Graphify JSON structure.
+        
+        Graphify outputs a structured JSON representing nodes (entities such as files,
+        modules, classes, functions, external packages) and directed edges (calls,
+        imports, contains, depends_on).
+        """
+        g = cls()
+        nodes = data.get("nodes", [])
+        if isinstance(nodes, list):
+            for n in nodes:
+                if isinstance(n, dict):
+                    node_id = str(n.get("id") or n.get("name") or "")
+                    if node_id:
+                        g.add_node(node_id, **n)
+                elif isinstance(n, str):
+                    g.add_node(n)
+        elif isinstance(nodes, dict):
+            for k, v in nodes.items():
+                attrs = v if isinstance(v, dict) else {}
+                g.add_node(str(k), **attrs)
+
+        edges = data.get("edges", []) or data.get("links", [])
+        if isinstance(edges, list):
+            for e in edges:
+                if isinstance(e, dict):
+                    u = str(e.get("source") or e.get("from") or e.get("u") or "")
+                    v = str(e.get("target") or e.get("to") or e.get("v") or "")
+                    weight = float(e.get("weight", 1.0))
+                    if u and v:
+                        g.add_edge(u, v, weight=weight)
+                elif isinstance(e, (list, tuple)) and len(e) >= 2:
+                    g.add_edge(str(e[0]), str(e[1]))
+
+        return g
+
+    def integrate_graphify_data(self, data: dict) -> int:
+        """
+        Integrate Graphify entities and relationships into this graph.
+        Returns the number of new edges added.
+        """
+        initial_edges = self.edge_count()
+        sub = self.from_graphify_data(data)
+        for u in sub.nodes():
+            self.add_node(u)
+            for v in sub.neighbors(u):
+                self.add_edge(u, v)
+        return self.edge_count() - initial_edges
+
+

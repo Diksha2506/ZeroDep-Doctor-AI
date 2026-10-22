@@ -33,8 +33,10 @@ PACKAGE_ALIAS_MAP: Dict[str, str] = {
     # Confirmed stable mappings
     "scikit-learn":         "sklearn",
     "pyyaml":               "yaml",
+    "yaml":                 "yaml",
     "pillow":               "PIL",
     "python-dotenv":        "dotenv",
+    "dotenv":               "dotenv",
     "beautifulsoup4":       "bs4",
     "opencv-python":        "cv2",
     "opencv-python-headless": "cv2",
@@ -59,8 +61,13 @@ PACKAGE_ALIAS_MAP: Dict[str, str] = {
     "wheel":                "wheel",
     "tomli":                "tomli",
     "tomli-w":              "tomli_w",
-    # Uncertain — keep but mark clearly
-    # "msgpack-python": "msgpack",  # upstream renamed to just "msgpack"
+    "flask-cors":           "flask_cors",
+    "python-multipart":     "multipart",
+    "torchvision":          "torchvision",
+    "ultralytics":          "ultralytics",
+    "poliastro":            "poliastro",
+    "sgp4":                 "sgp4",
+    "astropy":              "astropy",
 }
 
 # Dependency group names that indicate dev/test scope
@@ -85,6 +92,8 @@ class ManifestDependency:
 class ManifestParseResult:
     dependencies: List[ManifestDependency] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    manifest_files_found: List[str] = field(default_factory=list)
+
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -238,31 +247,146 @@ _DEV_REQ_PATTERNS = ("requirements-dev.txt", "requirements-test.txt",
 
 
 def parse_manifests(root_path: Path) -> ManifestParseResult:
-    """Discover and parse all manifest files in root_path."""
+    """Discover and parse all manifest files in root_path and immediate project subfolders."""
     result = ManifestParseResult()
     seen: Dict[str, ManifestDependency] = {}  # dedup by (name, scope)
+    manifest_files_found: List[str] = []
 
-    def _add(dep: ManifestDependency) -> None:
+    def _add(dep: ManifestDependency, rel_path: str) -> None:
         key = f"{dep.name}::{dep.scope}"
         if key not in seen:
             seen[key] = dep
+        if rel_path not in manifest_files_found:
+            manifest_files_found.append(rel_path)
 
-    # 1. pyproject.toml
-    for dep in parse_pyproject_toml(root_path / "pyproject.toml"):
-        _add(dep)
+    # Search candidates in root and subdirectories (excluding virtual environments, git, caches)
+    skip_dirs = {".git", ".tox", ".pytest_cache", "venv", ".venv", "env", "node_modules", "site-packages", "__pycache__"}
 
-    # 2. requirements.txt (runtime)
-    for dep in parse_requirements_txt(root_path / "requirements.txt", scope="runtime"):
-        _add(dep)
+    def _should_skip_dir(p: Path) -> bool:
+        return any(part in skip_dirs for part in p.parts)
 
-    # 3. Dev/test requirements
-    for pattern in _DEV_REQ_PATTERNS:
-        scope = "test" if "test" in pattern else "dev"
-        for dep in parse_requirements_txt(root_path / pattern, scope=scope):
-            _add(dep)
+    _SUPPORTED_MANIFESTS = ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg", "Pipfile") + _DEV_REQ_PATTERNS
+
+    candidate_files = []
+    # 1. Direct root candidates
+    for name in _SUPPORTED_MANIFESTS:
+        target = root_path / name
+        if target.is_file():
+            candidate_files.append(target)
+
+    # 2. Subdirectory candidates (e.g. backend/requirements.txt, src/requirements.txt)
+    for p in root_path.glob("*/*"):
+        if p.is_file() and not _should_skip_dir(p.parent):
+            if p.name in _SUPPORTED_MANIFESTS:
+                if p not in candidate_files:
+                    candidate_files.append(p)
+
+    # 3. Parse discovered manifests
+    for mf in candidate_files:
+        rel = str(mf.relative_to(root_path))
+        if mf.name == "pyproject.toml":
+            parsed = parse_pyproject_toml(mf)
+            if parsed:
+                for dep in parsed:
+                    _add(dep, rel)
+            else:
+                if rel not in manifest_files_found:
+                    manifest_files_found.append(rel)
+        elif mf.name.endswith(".txt"):
+            scope = "test" if "test" in mf.name else ("dev" if "dev" in mf.name else "runtime")
+            parsed = parse_requirements_txt(mf, scope=scope)
+            if parsed:
+                for dep in parsed:
+                    _add(dep, rel)
+            else:
+                if rel not in manifest_files_found:
+                    manifest_files_found.append(rel)
+        elif mf.name == "setup.py":
+            # Simple static extraction of install_requires
+            if rel not in manifest_files_found:
+                manifest_files_found.append(rel)
+            try:
+                content = mf.read_text(encoding="utf-8", errors="ignore")
+                match = re.search(r"install_requires\s*=\s*\[(.*?)\]", content, re.DOTALL)
+                if match:
+                    items = re.findall(r"['\"]([^'\"]+)['\"]", match.group(1))
+                    for item in items:
+                        pkg, imp = normalize_package_name(item)
+                        if pkg:
+                            dep = ManifestDependency(
+                                name=pkg.lower(),
+                                import_name=imp,
+                                source_file=mf.name,
+                                raw_spec=item,
+                                scope="runtime",
+                            )
+                            _add(dep, rel)
+            except Exception:
+                pass
+        elif mf.name == "setup.cfg":
+            if rel not in manifest_files_found:
+                manifest_files_found.append(rel)
+            try:
+                import configparser
+                cfg = configparser.ConfigParser()
+                cfg.read(str(mf), encoding="utf-8")
+                raw_install = cfg.get("options", "install_requires", fallback="")
+                for line in raw_install.splitlines():
+                    raw = line.strip()
+                    if raw and not raw.startswith("#"):
+                        pkg, imp = normalize_package_name(raw)
+                        if pkg:
+                            dep = ManifestDependency(
+                                name=pkg.lower(),
+                                import_name=imp,
+                                source_file=mf.name,
+                                raw_spec=raw,
+                                scope="runtime",
+                            )
+                            _add(dep, rel)
+            except Exception:
+                pass
+        elif mf.name == "Pipfile":
+            if rel not in manifest_files_found:
+                manifest_files_found.append(rel)
+            try:
+                content = mf.read_text(encoding="utf-8", errors="ignore")
+                in_packages = False
+                in_dev_packages = False
+                for line in content.splitlines():
+                    line_clean = line.strip()
+                    if line_clean.startswith("[packages]"):
+                        in_packages = True
+                        in_dev_packages = False
+                        continue
+                    elif line_clean.startswith("[dev-packages]"):
+                        in_packages = False
+                        in_dev_packages = True
+                        continue
+                    elif line_clean.startswith("["):
+                        in_packages = False
+                        in_dev_packages = False
+                        continue
+                    if (in_packages or in_dev_packages) and "=" in line_clean and not line_clean.startswith("#"):
+                        pkg_raw = line_clean.split("=")[0].strip().strip('"').strip("'")
+                        if pkg_raw:
+                            pkg, imp = normalize_package_name(pkg_raw)
+                            if pkg:
+                                dep = ManifestDependency(
+                                    name=pkg.lower(),
+                                    import_name=imp,
+                                    source_file=mf.name,
+                                    raw_spec=line_clean,
+                                    scope="dev" if in_dev_packages else "runtime",
+                                )
+                                _add(dep, rel)
+            except Exception:
+                pass
 
     result.dependencies = list(seen.values())
+    result.manifest_files_found = manifest_files_found
     return result
+
 
 # --- ast_visitor.py ---
 
@@ -693,6 +817,10 @@ class ZeroDepGraph:
     def edge_count(self) -> int:
         return sum(len(v) for v in self._adj.values())
 
+    @property
+    def num_edges(self) -> int:
+        return self.edge_count()
+
     # ──────────────────────────────────────────
     # Traversals
     # ──────────────────────────────────────────
@@ -911,6 +1039,63 @@ class ZeroDepGraph:
                     depth[v] = depth[u] + 1
         return max(depth.values()) if depth else 0
 
+    # ──────────────────────────────────────────
+    # Graphify structural integration
+    # ──────────────────────────────────────────
+
+    @classmethod
+    def from_graphify_data(cls, data: dict) -> "ZeroDepGraph":
+        """
+        Build or enhance a ZeroDepGraph using actual Graphify JSON structure.
+        
+        Graphify outputs a structured JSON representing nodes (entities such as files,
+        modules, classes, functions, external packages) and directed edges (calls,
+        imports, contains, depends_on).
+        """
+        g = cls()
+        nodes = data.get("nodes", [])
+        if isinstance(nodes, list):
+            for n in nodes:
+                if isinstance(n, dict):
+                    node_id = str(n.get("id") or n.get("name") or "")
+                    if node_id:
+                        g.add_node(node_id, **n)
+                elif isinstance(n, str):
+                    g.add_node(n)
+        elif isinstance(nodes, dict):
+            for k, v in nodes.items():
+                attrs = v if isinstance(v, dict) else {}
+                g.add_node(str(k), **attrs)
+
+        edges = data.get("edges", []) or data.get("links", [])
+        if isinstance(edges, list):
+            for e in edges:
+                if isinstance(e, dict):
+                    u = str(e.get("source") or e.get("from") or e.get("u") or "")
+                    v = str(e.get("target") or e.get("to") or e.get("v") or "")
+                    weight = float(e.get("weight", 1.0))
+                    if u and v:
+                        g.add_edge(u, v, weight=weight)
+                elif isinstance(e, (list, tuple)) and len(e) >= 2:
+                    g.add_edge(str(e[0]), str(e[1]))
+
+        return g
+
+    def integrate_graphify_data(self, data: dict) -> int:
+        """
+        Integrate Graphify entities and relationships into this graph.
+        Returns the number of new edges added.
+        """
+        initial_edges = self.edge_count()
+        sub = self.from_graphify_data(data)
+        for u in sub.nodes():
+            self.add_node(u)
+            for v in sub.neighbors(u):
+                self.add_edge(u, v)
+        return self.edge_count() - initial_edges
+
+
+
 # --- migration_engine.py ---
 
 from dataclasses import dataclass
@@ -1056,7 +1241,7 @@ def get_recipe(package_name: str, used_symbols: Optional[Dict[str, int]] = None)
 # --- scoring_engine.py ---
 
 from dataclasses import dataclass
-from typing import List, Set
+from typing import List, Optional, Set
 
 @dataclass
 class ScoreBreakdown:
@@ -1070,8 +1255,14 @@ class ScoreBreakdown:
     replaceable_penalty: float
     essential_penalty: float
     stdlib_bonus: float
+    undeclared_count: int = 0
+    undeclared_penalty: float = 0.0
+    audit_status: str = "ASSESSED"  # "ASSESSED" | "GENUINE_ZERO_DEP" | "UNABLE_TO_ASSESS" | "UNDECLARED_DEPS_FOUND"
+    status_message: str = ""
 
-def calculate_grade(score: float) -> str:
+def calculate_grade(score: float, audit_status: str = "ASSESSED") -> str:
+    if audit_status == "UNABLE_TO_ASSESS":
+        return "N/A"
     if score >= 90.0:
         return "A+"
     elif score >= 80.0:
@@ -1090,8 +1281,76 @@ def calculate_score(
     used_deps: Set[str],
     replaceable_deps: Set[str],
     total_stdlib_calls: int,
-    total_calls: int
+    total_calls: int,
+    undeclared_third_party_deps: Optional[Set[str]] = None,
+    files_scanned: int = -1,
+    manifest_found: bool = True,
 ) -> ScoreBreakdown:
+    undeclared = undeclared_third_party_deps or set()
+    undeclared_count = len(undeclared)
+
+    # 1. Edge case: Incomplete audit / no files scanned
+    # files_scanned == -1 means "not provided by caller" (legacy callers / unit tests)
+    if files_scanned == 0:
+        return ScoreBreakdown(
+            current_score=0.0,
+            potential_score=0.0,
+            grade="N/A",
+            unused_count=0,
+            replaceable_count=0,
+            essential_count=0,
+            unused_penalty=0.0,
+            replaceable_penalty=0.0,
+            essential_penalty=0.0,
+            stdlib_bonus=0.0,
+            undeclared_count=0,
+            undeclared_penalty=0.0,
+            audit_status="UNABLE_TO_ASSESS",
+            status_message="No supported Python source files found in target path.",
+        )
+
+    # 2. Edge case: No manifest found, but third-party imports detected in source
+    if not manifest_found and not declared_deps and undeclared_count > 0:
+        # Penalize for undeclared dependencies
+        undeclared_penalty = undeclared_count * 10.0
+        raw_current = max(0.0, 100.0 - undeclared_penalty)
+        return ScoreBreakdown(
+            current_score=round(raw_current, 1),
+            potential_score=round(raw_current, 1),
+            grade=calculate_grade(raw_current),
+            unused_count=0,
+            replaceable_count=0,
+            essential_count=undeclared_count,
+            unused_penalty=0.0,
+            replaceable_penalty=0.0,
+            essential_penalty=undeclared_penalty,
+            stdlib_bonus=0.0,
+            undeclared_count=undeclared_count,
+            undeclared_penalty=undeclared_penalty,
+            audit_status="UNDECLARED_DEPS_FOUND",
+            status_message=f"No manifest found; {undeclared_count} unpinned third-party dependencies detected in source.",
+        )
+
+    # 3. Edge case: Genuine zero-dependency project (manifest empty or absent, 0 third-party imports, stdlib only)
+    if not declared_deps and undeclared_count == 0:
+        return ScoreBreakdown(
+            current_score=100.0,
+            potential_score=100.0,
+            grade="A+",
+            unused_count=0,
+            replaceable_count=0,
+            essential_count=0,
+            unused_penalty=0.0,
+            replaceable_penalty=0.0,
+            essential_penalty=0.0,
+            stdlib_bonus=10.0,
+            undeclared_count=0,
+            undeclared_penalty=0.0,
+            audit_status="GENUINE_ZERO_DEP",
+            status_message="Pure Python standard library project. 0 external dependencies detected.",
+        )
+
+    # 4. Standard calculation for declared dependencies
     unused_deps = declared_deps - used_deps
     active_deps = declared_deps & used_deps
     
@@ -1105,11 +1364,12 @@ def calculate_score(
     unused_penalty = unused_count * 15.0
     replaceable_penalty = replaceable_count * 8.0
     essential_penalty = essential_count * 4.0
+    undeclared_penalty = undeclared_count * 6.0
 
     stdlib_ratio = (total_stdlib_calls / total_calls) if total_calls > 0 else 1.0
     stdlib_bonus = round(stdlib_ratio * 10.0, 1)
 
-    raw_current = 100.0 - (unused_penalty + replaceable_penalty + essential_penalty) + stdlib_bonus
+    raw_current = 100.0 - (unused_penalty + replaceable_penalty + essential_penalty + undeclared_penalty) + stdlib_bonus
     current_score = max(0.0, min(100.0, raw_current))
 
     raw_potential = 100.0 - essential_penalty + stdlib_bonus
@@ -1125,8 +1385,13 @@ def calculate_score(
         unused_penalty=unused_penalty,
         replaceable_penalty=replaceable_penalty,
         essential_penalty=essential_penalty,
-        stdlib_bonus=stdlib_bonus
+        stdlib_bonus=stdlib_bonus,
+        undeclared_count=undeclared_count,
+        undeclared_penalty=undeclared_penalty,
+        audit_status="ASSESSED",
+        status_message="Project dependencies and health calculated from manifest and AST evidence.",
     )
+
 
 # --- cli_formatter.py ---
 
@@ -2840,24 +3105,31 @@ def scan_project(target_dir: Path) -> dict:
     graph = ZeroDepGraph()
 
     # ── File discovery + AST analysis ──────────────────────
+    parse_errors: List[str] = []
     for py_file in target_dir.rglob("*.py"):
         if _should_skip(py_file, target_dir):
             continue
         # Safety: skip symlinks that escape the project root
         try:
-            resolved = py_file.resolve()
-            resolved.relative_to(target_dir.resolve())
+            resolved_file = py_file.resolve()
+            resolved_file.relative_to(target_dir.resolve())
         except (ValueError, OSError):
             continue
 
         try:
-            content = py_file.read_text(encoding="utf-8", errors="ignore")
+            raw_bytes = py_file.read_bytes()
+            # Strip UTF-8 BOM (U+FEFF) if present — prevents SyntaxError
+            if raw_bytes.startswith(b"\xef\xbb\xbf"):
+                raw_bytes = raw_bytes[3:]
+            content = raw_bytes.decode("utf-8", errors="ignore")
         except (OSError, PermissionError):
             continue
 
         total_loc += content.count("\n") + 1
         rel_path = str(py_file.relative_to(target_dir))
         res = analyze_ast(rel_path, content)
+        if res.has_syntax_error:
+            parse_errors.append(f"{rel_path}: {res.error_message}")
         ast_results.append(res)
 
     # Pre-index file stems and imports/call sites in O(N)
@@ -2886,6 +3158,25 @@ def scan_project(target_dir: Path) -> dict:
             else:
                 graph.add_edge(res.file_path, mod_base)
 
+    # ── Check for Graphify structural output (graph.json) ──────
+    graphify_candidates = [
+        target_dir / "graphify-out" / "graph.json",
+        target_dir / "graphify.json",
+        target_dir / ".graphify" / "graph.json",
+    ]
+    graphify_detected = False
+    graphify_edges_added = 0
+    for g_path in graphify_candidates:
+        if g_path.exists():
+            try:
+                with open(g_path, "r", encoding="utf-8") as gf:
+                    g_data = json.load(gf)
+                graphify_edges_added = graph.integrate_graphify_data(g_data)
+                graphify_detected = True
+                break
+            except Exception:
+                pass
+
     # ── Match used packages to declared dependencies ────────
     decl_by_import: Dict[str, ManifestDependency] = {}
     decl_by_pypi: Dict[str, ManifestDependency] = {}
@@ -2897,8 +3188,11 @@ def scan_project(target_dir: Path) -> dict:
         d.name for d in manifest_result.dependencies if d.scope == "runtime"
     }
     all_declared: Set[str] = {d.name for d in manifest_result.dependencies}
+    manifest_found: bool = bool(manifest_result.manifest_files_found)
 
     used_deps: Set[str] = set()
+    # Imports that don't match any declared dependency (potential undeclared third-party)
+    unresolved_imports: Set[str] = set()
     for res in ast_results:
         for imp in res.imports:
             if imp.is_stdlib or imp.is_relative:
@@ -2908,6 +3202,10 @@ def scan_project(target_dir: Path) -> dict:
                 used_deps.add(decl_by_import[mod_base].name)
             elif mod_base in decl_by_pypi:
                 used_deps.add(decl_by_pypi[mod_base].name)
+            else:
+                # Not in stdlib, not in declared deps — could be undeclared third-party
+                # or a local module. We record for scoring but cannot be certain.
+                unresolved_imports.add(mod_base)
 
     replaceable_set: Set[str] = set(RECIPES.keys())
 
@@ -2965,6 +3263,12 @@ def scan_project(target_dir: Path) -> dict:
         else:
             evidence.append("[X] 0 call site references detected in codebase AST")
 
+        # Known CLI runner / runtime entrypoint packages that might not be imported directly in source
+        _CLI_RUNNERS = {"uvicorn", "gunicorn", "celery", "waitress", "daphne", "hypercorn"}
+        if status in ("UNUSED", "IMPORTED_BUT_UNUSED") and dep.lower() in _CLI_RUNNERS:
+            evidence.append("[!] Notice: Package is often invoked as a CLI runner/service, not directly imported in code")
+            confidence = "MEDIUM"
+
         # Confidence rating
         if status in ("UNUSED", "IMPORTED_BUT_UNUSED"):
             confidence = "HIGH" if not any(imp.is_star for _, imp in dep_imports) else "MEDIUM"
@@ -2994,12 +3298,27 @@ def scan_project(target_dir: Path) -> dict:
             "imports_count": len(dep_imports),
         }
 
+    # Narrow unresolved imports to likely third-party (not local module names)
+    # by filtering out names that appear as file stems or top-level package dirs in this project
+    local_stems: Set[str] = set()
+    for r in ast_results:
+        p = Path(r.file_path)
+        local_stems.add(p.stem.lower())
+        for part in p.parts[:-1]:
+            local_stems.add(part.lower())
+    undeclared_third_party: Set[str] = {
+        m for m in unresolved_imports if m not in local_stems
+    }
+
     score_info = calculate_score(
         declared_deps=runtime_declared if runtime_declared else all_declared,
         used_deps=used_deps,
         replaceable_deps=replaceable_set,
         total_stdlib_calls=total_stdlib_calls,
         total_calls=total_calls,
+        undeclared_third_party_deps=undeclared_third_party,
+        files_scanned=len(ast_results),
+        manifest_found=manifest_found,
     )
 
     duration = time.perf_counter() - start_time
@@ -3010,12 +3329,19 @@ def scan_project(target_dir: Path) -> dict:
         "loc": total_loc,
         "duration": duration,
         "manifest_dependencies": manifest_result.dependencies,
+        "manifest_files_found": manifest_result.manifest_files_found,
+        "manifest_found": manifest_found,
         "declared_deps": runtime_declared if runtime_declared else all_declared,
         "used_deps": used_deps,
+        "unresolved_imports": unresolved_imports,
+        "undeclared_third_party": undeclared_third_party,
+        "parse_errors": parse_errors,
         "usage_details": dep_usage_details,
         "ast_results": ast_results,
         "score_info": score_info,
         "graph": graph,
+        "graphify_detected": graphify_detected,
+        "graphify_edges_added": graphify_edges_added,
         "dynamic_imports": [
             di for res in ast_results for di in res.dynamic_imports
         ],

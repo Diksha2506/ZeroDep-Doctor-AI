@@ -187,20 +187,68 @@ The `demo/` directory demonstrates all key capabilities:
 
 ---
 
+## AI Sprint Innovation: Evidence-Grounded Dependency Doctor
+
+ZeroDep Doctor AI connects deterministic AST evidence to open-weight models (served locally via Ollama) and an interactive web dashboard:
+
+1. **Deterministic Static Engine (Core)**: 100% Python Standard Library. Discovers AST call sites, scopes, graph cycles, blast radius impact, and risk scores.
+2. **Open-Weight AI Model Integration**: Optional local LLM adapter (`zerodep.ai_adapter.ZeroDepAIAdapter`) querying Ollama (`llama3.2`, `mistral`, `deepseek-r1`) via HTTP.
+   - **Strict Evidence Grounding**: The model receives real symbol counts, call site references, and manifest data.
+   - **No Hallucinations**: Zero fabricated paths or CVEs.
+   - **Deterministic Fallback**: If Ollama or the model is offline, gracefully falls back to the deterministic rules engine without failing.
+3. **Reviewable Migration Diff Engine**: Proposes unified diff patches for supported stdlib recipes (e.g. `tabulate`, `click`, `colorama`, `networkx`, `requests`). Enforces explicit user approval and rejects low-confidence auto-application.
+4. **Isolated Sandboxed Verifier**: Safely tests proposed migrations by cloning the project into a temporary isolated directory, applying the patch, and executing test suites or syntax verification with timeouts. Never executes uploaded project code during static audit.
+5. **FastAPI & Web Dashboard**: Live modern UI with scorecard metrics, dependency classification table, AST evidence inspector, AI reasoning panel, diff viewer, and sandbox verification output.
+
+---
+
+## Getting Started
+
+### 1. Install & Run CLI
+```bash
+# Clone repository
+git clone https://github.com/Diksha2506/Zerodep-Intelligent_dependency_analyzer.git
+cd Zerodep-Intelligent_dependency_analyzer
+
+# Run pure CLI static audit (Zero external dependencies)
+python -m zerodep.cli analyze demo
+python -m zerodep.cli plan demo
+python -m zerodep.cli summary demo
+```
+
+### 2. Launch FastAPI Server & Web Dashboard
+```bash
+# Start backend server on port 8000
+python -m uvicorn zerodep.server:app --port 8000
+
+# Open in browser:
+# http://localhost:8000
+```
+
+### 3. (Optional) Run with Local Open-Weight LLM (Ollama)
+```bash
+# In another terminal, start Ollama and pull llama3.2
+ollama serve
+ollama pull llama3.2
+
+# ZeroDep Doctor automatically connects to http://localhost:11434
+# If Ollama is not running, ZeroDep Doctor seamlessly uses its built-in
+# deterministic evidence engine fallback.
+```
+
+---
+
 ## Verification & Testing
 
 ```bash
-# Run full test suite
-python -m unittest discover -s tests -p "test_*.py"
+# Run full test suite (339 tests passing)
+python -m pytest
 
-# Build single-file bundle
+# Run AI Sprint tests specifically
+python -m pytest tests/test_ai_sprint.py
+
+# Build single-file standalone distribution
 python bundle.py
-
-# Performance benchmark
-python benchmark.py
-
-# Self-audit (must score 100/100 A+)
-python dist/zerodep.py analyze .
 ```
 
 ---
@@ -215,33 +263,19 @@ Measured across synthetic Python repositories:
 | **100 Files** | 100 | 700 | **0.294s** |
 | **1,000 Files** | 1,000 | 7,000 | **4.06s** |
 
-> Historical Progress at 1,000 files: Original Baseline (14.75s) → Day 1 Hardened (6.55s) → Final State (4.06s). Final version is **3.6x faster** than original baseline despite richer analysis.
-
 ---
 
-## Known Limitations
+## Known Limitations & Security Guardrails
 
-1. **Dynamic imports** (`importlib.import_module`, `__import__`) cannot be statically resolved — flagged as warnings.
-2. **Star imports** (`from pkg import *`) prevent exact symbol attribution — downgrade confidence to MEDIUM.
-3. **Complex `requests` usage** (Session, auth, adapters) receives LOW confidence — manual migration required.
-4. **Python version**: Requires 3.11+ for `tomllib` support; `pyproject.toml` parsing degrades gracefully on lower versions.
-5. **Migration diffs are reviewable suggestions** — they are not automatically applied to source code.
-
----
-
-## Zero-Dependency Proof
-
-| Evidence | Status |
-| :--- | :--- |
-| `requirements.txt` has 0 runtime packages | ✓ |
-| `pyproject.toml` empty `[dependencies]` | ✓ |
-| `zerodep analyze .` scores 100/100 A+ | ✓ |
-| Runs in clean `python -m venv` | ✓ |
-| Single-file `python dist/zerodep.py` works | ✓ |
-| Byte-identical reproducible build (`CertUtil SHA-256`) | ✓ |
+1. **Non-destructive Static Analysis**: Scanning never executes target code.
+2. **Reviewable Diff Workflows**: Migration patches are generated as unified diff previews. Low-confidence cases (such as stateful `requests.Session` usage) are flagged and blocked from auto-application.
+3. **Sandbox Isolation**: Verifications run exclusively in temporary workspaces with directory-traversal bounds checking (`relative_to` enforcement).
+4. **AI Hallucination Containment**: The AI prompt is strictly constrained to AST output, symbol counts, and known limitations.
+5. **No CVE Marketing**: ZeroDep Doctor is a static code usage and standard-library migration engine, not a CVE/vulnerability database scanner.
 
 ---
 
 ## License
 
 MIT License — Hackathon Raptors 2026 Submission.
+

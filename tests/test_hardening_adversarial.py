@@ -44,10 +44,27 @@ class TestHostileProjectStructures(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def test_empty_directory(self):
+        """An empty directory (0 Python files) must return UNABLE_TO_ASSESS.
+
+        It should NEVER receive a perfect score of 100/100 — that would be
+        a misleading result. The scanner needs at least one .py file to
+        produce a meaningful assessment.
+
+        Regression: before the files_scanned guard was wired end-to-end,
+        calculate_score received files_scanned=-1 (sentinel) and fell through
+        to the GENUINE_ZERO_DEP branch, returning 100.0. This test locks that
+        bug out permanently.
+        """
         scan = scan_project(self.proj)
         self.assertEqual(scan["files_scanned"], 0)
         self.assertEqual(len(scan["declared_deps"]), 0)
-        self.assertEqual(scan["score_info"].current_score, 100.0)
+        # Must NOT receive a misleading perfect score
+        self.assertEqual(scan["score_info"].current_score, 0.0,
+                         "Empty directory must not receive a perfect score")
+        self.assertEqual(scan["score_info"].audit_status, "UNABLE_TO_ASSESS",
+                         "Empty directory must be marked UNABLE_TO_ASSESS")
+        self.assertEqual(scan["score_info"].grade, "N/A",
+                         "Empty directory grade must be N/A")
 
     def test_single_python_file(self):
         (self.proj / "main.py").write_text("import math\nprint(math.pi)\n")

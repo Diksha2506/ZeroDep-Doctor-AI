@@ -94,24 +94,31 @@ def scan_project(target_dir: Path) -> dict:
     graph = ZeroDepGraph()
 
     # ── File discovery + AST analysis ──────────────────────
+    parse_errors: List[str] = []
     for py_file in target_dir.rglob("*.py"):
         if _should_skip(py_file, target_dir):
             continue
         # Safety: skip symlinks that escape the project root
         try:
-            resolved = py_file.resolve()
-            resolved.relative_to(target_dir.resolve())
+            resolved_file = py_file.resolve()
+            resolved_file.relative_to(target_dir.resolve())
         except (ValueError, OSError):
             continue
 
         try:
-            content = py_file.read_text(encoding="utf-8", errors="ignore")
+            raw_bytes = py_file.read_bytes()
+            # Strip UTF-8 BOM (U+FEFF) if present — prevents SyntaxError
+            if raw_bytes.startswith(b"\xef\xbb\xbf"):
+                raw_bytes = raw_bytes[3:]
+            content = raw_bytes.decode("utf-8", errors="ignore")
         except (OSError, PermissionError):
             continue
 
         total_loc += content.count("\n") + 1
         rel_path = str(py_file.relative_to(target_dir))
         res = analyze_ast(rel_path, content)
+        if res.has_syntax_error:
+            parse_errors.append(f"{rel_path}: {res.error_message}")
         ast_results.append(res)
 
     # Pre-index file stems and imports/call sites in O(N)
@@ -140,6 +147,26 @@ def scan_project(target_dir: Path) -> dict:
             else:
                 graph.add_edge(res.file_path, mod_base)
 
+    # ── Check for Graphify structural output (graph.json) ──────
+    graphify_candidates = [
+        target_dir / "graphify-out" / "graph.json",
+        target_dir / "graphify.json",
+        target_dir / ".graphify" / "graph.json",
+    ]
+    graphify_detected = False
+    graphify_edges_added = 0
+    for g_path in graphify_candidates:
+        if g_path.exists():
+            try:
+                import json
+                with open(g_path, "r", encoding="utf-8") as gf:
+                    g_data = json.load(gf)
+                graphify_edges_added = graph.integrate_graphify_data(g_data)
+                graphify_detected = True
+                break
+            except Exception:
+                pass
+
     # ── Match used packages to declared dependencies ────────
     decl_by_import: Dict[str, ManifestDependency] = {}
     decl_by_pypi: Dict[str, ManifestDependency] = {}
@@ -151,8 +178,11 @@ def scan_project(target_dir: Path) -> dict:
         d.name for d in manifest_result.dependencies if d.scope == "runtime"
     }
     all_declared: Set[str] = {d.name for d in manifest_result.dependencies}
+    manifest_found: bool = bool(manifest_result.manifest_files_found)
 
     used_deps: Set[str] = set()
+    # Imports that don't match any declared dependency (potential undeclared third-party)
+    unresolved_imports: Set[str] = set()
     for res in ast_results:
         for imp in res.imports:
             if imp.is_stdlib or imp.is_relative:
@@ -162,6 +192,10 @@ def scan_project(target_dir: Path) -> dict:
                 used_deps.add(decl_by_import[mod_base].name)
             elif mod_base in decl_by_pypi:
                 used_deps.add(decl_by_pypi[mod_base].name)
+            else:
+                # Not in stdlib, not in declared deps — could be undeclared third-party
+                # or a local module. We record for scoring but cannot be certain.
+                unresolved_imports.add(mod_base)
 
     replaceable_set: Set[str] = set(RECIPES.keys())
 
@@ -219,6 +253,12 @@ def scan_project(target_dir: Path) -> dict:
         else:
             evidence.append("[X] 0 call site references detected in codebase AST")
 
+        # Known CLI runner / runtime entrypoint packages that might not be imported directly in source
+        _CLI_RUNNERS = {"uvicorn", "gunicorn", "celery", "waitress", "daphne", "hypercorn"}
+        if status in ("UNUSED", "IMPORTED_BUT_UNUSED") and dep.lower() in _CLI_RUNNERS:
+            evidence.append("[!] Notice: Package is often invoked as a CLI runner/service, not directly imported in code")
+            confidence = "MEDIUM"
+
         # Confidence rating
         if status in ("UNUSED", "IMPORTED_BUT_UNUSED"):
             confidence = "HIGH" if not any(imp.is_star for _, imp in dep_imports) else "MEDIUM"
@@ -248,12 +288,27 @@ def scan_project(target_dir: Path) -> dict:
             "imports_count": len(dep_imports),
         }
 
+    # Narrow unresolved imports to likely third-party (not local module names)
+    # by filtering out names that appear as file stems or top-level package dirs in this project
+    local_stems: Set[str] = set()
+    for r in ast_results:
+        p = Path(r.file_path)
+        local_stems.add(p.stem.lower())
+        for part in p.parts[:-1]:
+            local_stems.add(part.lower())
+    undeclared_third_party: Set[str] = {
+        m for m in unresolved_imports if m not in local_stems
+    }
+
     score_info = calculate_score(
         declared_deps=runtime_declared if runtime_declared else all_declared,
         used_deps=used_deps,
         replaceable_deps=replaceable_set,
         total_stdlib_calls=total_stdlib_calls,
         total_calls=total_calls,
+        undeclared_third_party_deps=undeclared_third_party,
+        files_scanned=len(ast_results),
+        manifest_found=manifest_found,
     )
 
     duration = time.perf_counter() - start_time
@@ -264,12 +319,19 @@ def scan_project(target_dir: Path) -> dict:
         "loc": total_loc,
         "duration": duration,
         "manifest_dependencies": manifest_result.dependencies,
+        "manifest_files_found": manifest_result.manifest_files_found,
+        "manifest_found": manifest_found,
         "declared_deps": runtime_declared if runtime_declared else all_declared,
         "used_deps": used_deps,
+        "unresolved_imports": unresolved_imports,
+        "undeclared_third_party": undeclared_third_party,
+        "parse_errors": parse_errors,
         "usage_details": dep_usage_details,
         "ast_results": ast_results,
         "score_info": score_info,
         "graph": graph,
+        "graphify_detected": graphify_detected,
+        "graphify_edges_added": graphify_edges_added,
         "dynamic_imports": [
             di for res in ast_results for di in res.dynamic_imports
         ],
