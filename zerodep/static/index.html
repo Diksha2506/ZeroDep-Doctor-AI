@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ZeroDep Doctor AI — Intelligent Dependency Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Header / Navbar -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-logo">0D</div>
+        <div class="brand-meta">
+          <h1>ZeroDep Doctor <span class="badge-ai">AI Sprint</span></h1>
+          <p class="tagline">Zero-Dependency Static AST Analyzer & Verified Stdlib Migration Engine</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="ai-status-pill" id="aiStatusPill" title="Local Open-Weight Model Status">
+          <span class="pulse-dot"></span>
+          <span id="aiModelText">Checking AI Model...</span>
+        </div>
+        <a href="https://github.com/Diksha2506/Zerodep-Intelligent_dependency_analyzer" target="_blank" class="btn btn-outline btn-sm">GitHub Repo</a>
+      </div>
+    </header>
+
+    <!-- Project Selector & Scan Bar -->
+    <section class="scan-bar-section">
+      <div class="scan-bar-container card">
+        <div class="scan-inputs">
+          <div class="input-group">
+            <label for="fixtureSelect">Sample Codebase:</label>
+            <select id="fixtureSelect" class="form-select">
+              <option value="demo">demo (Bloated App - click, requests, tabulate, networkx, pytz)</option>
+              <option value="fixtures/case_a_cli">fixtures/case_a_cli (CLI Tool - click, requests)</option>
+              <option value="fixtures/case_b_medium">fixtures/case_b_medium (Data Pipeline - requests, loguru)</option>
+              <option value="fixtures/case_c_heavy">fixtures/case_c_heavy (Heavy Service - multi-deps)</option>
+            </select>
+          </div>
+          <div class="input-group flex-1">
+            <label for="projectPathInput">Target Project Path:</label>
+            <input type="text" id="projectPathInput" class="form-input" value="demo" placeholder="e.g. demo, fixtures/case_a_cli, or ./my_repo" />
+          </div>
+          <button id="analyzeBtn" class="btn btn-primary btn-analyze">
+            <span class="btn-text">Audit Codebase</span>
+            <span class="spinner hidden" id="scanSpinner"></span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main Content Area -->
+    <main class="dashboard-grid">
+      <!-- Left Column: Metrics & Dependency Table -->
+      <section class="left-col">
+        <!-- Scorecard Summary Cards -->
+        <div class="metrics-grid">
+          <div class="metric-card card">
+            <div class="metric-header">
+              <span class="metric-title">Health Score</span>
+              <span class="badge-grade" id="gradeBadge">--</span>
+            </div>
+            <div class="metric-score-group">
+              <span class="metric-huge" id="scoreCurrent">--</span>
+              <span class="metric-sub">/ 100</span>
+            </div>
+            <div class="metric-progress-bar">
+              <div class="metric-progress-fill" id="scoreBar" style="width: 0%"></div>
+            </div>
+            <div class="metric-footer">
+              <span>Potential: <strong id="scorePotential">--</strong></span>
+              <span class="text-muted" id="scanDuration">-- s</span>
+            </div>
+          </div>
+
+          <div class="metric-card card">
+            <div class="metric-title">Dependency Breakdown</div>
+            <div class="breakdown-list">
+              <div class="breakdown-item">
+                <span class="dot dot-unused"></span>
+                <span class="item-name">Unused (Dead):</span>
+                <strong id="countUnused" class="item-val">--</strong>
+              </div>
+              <div class="breakdown-item">
+                <span class="dot dot-replaceable"></span>
+                <span class="item-name">Replaceable (Stdlib):</span>
+                <strong id="countReplaceable" class="item-val">--</strong>
+              </div>
+              <div class="breakdown-item">
+                <span class="dot dot-essential"></span>
+                <span class="item-name">Essential (Core):</span>
+                <strong id="countEssential" class="item-val">--</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="metric-card card">
+            <div class="metric-title">AST & Graph Engine</div>
+            <div class="stats-table">
+              <div class="stat-row">
+                <span>Files Scanned:</span>
+                <strong id="filesScanned">--</strong>
+              </div>
+              <div class="stat-row">
+                <span>Lines of Code:</span>
+                <strong id="locScanned">--</strong>
+              </div>
+              <div class="stat-row">
+                <span>Graph Nodes / Edges:</span>
+                <strong id="graphMetrics">-- / --</strong>
+              </div>
+              <div class="stat-row">
+                <span>Import Cycles:</span>
+                <strong id="graphCycles">--</strong>
+              </div>
+              <div class="stat-row">
+                <span>Audit Status:</span>
+                <strong id="auditStatus">--</strong>
+              </div>
+              <div class="stat-row" id="manifestsRow" style="display: none;">
+                <span>Manifests:</span>
+                <strong id="manifestsFound">--</strong>
+              </div>
+              <div class="stat-row" id="parseErrorsRow" style="display: none; color: #f59e0b;">
+                <span>Parse Warnings:</span>
+                <strong id="parseErrorsCount">0</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Dependency Table -->
+        <div class="table-card card">
+          <div class="card-header">
+            <h3>Discovered Dependencies</h3>
+            <span class="header-desc">AST call sites, usage scope, and stdlib migration readiness</span>
+          </div>
+          <div class="table-container">
+            <table class="dep-table" id="depTable">
+              <thead>
+                <tr>
+                  <th>Package</th>
+                  <th>Classification</th>
+                  <th>Confidence</th>
+                  <th>Risk Score</th>
+                  <th>Impact</th>
+                  <th>Call Sites</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="depTableBody">
+                <tr>
+                  <td colspan="7" class="empty-state">Click "Audit Codebase" above to run the ZeroDep static analysis engine.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Column: Detail, AI Grounded Explanation & Verification -->
+      <section class="right-col">
+        <!-- Selected Dependency Overview -->
+        <div class="card detail-card" id="detailCard">
+          <div class="card-header">
+            <div class="badge-row">
+              <span class="badge" id="depCategoryBadge">SELECT A PACKAGE</span>
+              <span class="badge badge-outline" id="depConfidenceBadge">--</span>
+            </div>
+            <h2 id="depTitle">Package Investigation</h2>
+            <p class="subtitle" id="depSubtitle">Click a row on the left to inspect AST evidence and run AI analysis.</p>
+          </div>
+
+          <!-- Tabs -->
+          <div class="tab-bar">
+            <button class="tab-btn active" data-tab="evidenceTab">AST Evidence</button>
+            <button class="tab-btn" data-tab="aiTab">Doctor AI Reasoning</button>
+            <button class="tab-btn" data-tab="diffTab">Migration Diff</button>
+            <button class="tab-btn" data-tab="verifyTab">Sandbox Verification</button>
+          </div>
+
+          <!-- Tab 1: AST Evidence -->
+          <div class="tab-pane active" id="evidenceTab">
+            <div class="evidence-section">
+              <h4>AST Evidence Trail</h4>
+              <ul class="evidence-list" id="evidenceList">
+                <li class="empty-text">No dependency selected.</li>
+              </ul>
+
+              <h4>Resolved Call Symbols</h4>
+              <div class="symbol-tags" id="symbolTags">
+                <span class="empty-text">No symbols.</span>
+              </div>
+
+              <h4>Touched Files</h4>
+              <div class="files-list" id="filesList">
+                <span class="empty-text">No files.</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 2: AI Reasoning -->
+          <div class="tab-pane" id="aiTab">
+            <div class="ai-box">
+              <div class="ai-box-header">
+                <div class="ai-header-left">
+                  <div class="ai-model-tag" id="aiEngineTag">Deterministic Fallback Engine</div>
+                  <select id="modelSelector" class="form-select form-select-xs" title="Select target open-weight model">
+                    <option value="llama3.2" selected>llama3.2 (Default)</option>
+                    <option value="gemma2:9b">gemma2:9b (Google Gemma)</option>
+                    <option value="gemma2:2b">gemma2:2b (Google Gemma Fast)</option>
+                    <option value="mistral">mistral (7B)</option>
+                    <option value="deepseek-r1">deepseek-r1</option>
+                  </select>
+                </div>
+                <button class="btn btn-outline btn-xs" id="reExplainBtn">Refresh AI Reasoning</button>
+              </div>
+              
+              <div class="ai-content" id="aiContent">
+                <div class="empty-state">Select a dependency to query the evidence-grounded AI model.</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 3: Migration Diff -->
+          <div class="tab-pane" id="diffTab">
+            <div class="diff-container">
+              <div class="diff-header-bar">
+                <div id="diffSummaryText" class="diff-summary-text">No migration proposal loaded.</div>
+                <button class="btn btn-primary btn-sm" id="loadDiffBtn">Generate Diff Preview</button>
+              </div>
+              <pre class="diff-code" id="diffViewer">Select a replaceable dependency to inspect reviewable standard-library patch diff.</pre>
+            </div>
+          </div>
+
+          <!-- Tab 4: Sandbox Verification -->
+          <div class="tab-pane" id="verifyTab">
+            <div class="verify-container">
+              <div class="verify-banner">
+                <div class="verify-banner-text">
+                  <h4>Sandboxed Verification Test</h4>
+                  <p>Preserves original source untouched. Clones into temporary isolated workspace, applies diff, and verifies compilation/test suite.</p>
+                  <label class="approval-label" style="display:flex; align-items:center; gap:0.5rem; margin-top:0.5rem; font-size:0.8rem; cursor:pointer;">
+                    <input type="checkbox" id="explicitApprovalCheckbox" />
+                    <span><strong>Explicit Approval:</strong> I have reviewed the proposed migration diff and approve sandboxed testing.</span>
+                  </label>
+                  <div id="verifyApprovalMsg" style="display:none; color:#ef4444; font-size:0.8rem; margin-top:0.35rem; font-weight:500;">
+                    ⚠️ Explicit developer approval is required before running sandboxed verification.
+                  </div>
+                  <div id="verifyDiffNotice" style="display:none; color:#f59e0b; font-size:0.8rem; margin-top:0.35rem;">
+                    ℹ️ Running Baseline Verification: No automated diff available for this package. Verifying clean build of project baseline.
+                  </div>
+                </div>
+                <button class="btn btn-accent" id="runVerifyBtn" disabled>Run Isolated Verification</button>
+              </div>
+
+              <div class="verify-results card" id="verifyResultsBox">
+                <div class="verify-status-row">
+                  <span>Verification Status:</span>
+                  <span class="badge" id="verifyStatusBadge">NOT RUN</span>
+                </div>
+                <div class="stat-row">
+                  <span>Subprocess Exit Code:</span>
+                  <strong id="verifyExitCode">--</strong>
+                </div>
+                <div class="stat-row">
+                  <span>Verification Command:</span>
+                  <code id="verifyCommand">--</code>
+                </div>
+                <div class="stat-row">
+                  <span>Duration:</span>
+                  <span id="verifyDuration">--</span>
+                </div>
+
+                <div class="terminal-box">
+                  <div class="terminal-title">Subprocess Output (stdout / stderr)</div>
+                  <pre class="terminal-content" id="verifyOutput">Run verification to inspect subprocess test execution output.</pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
