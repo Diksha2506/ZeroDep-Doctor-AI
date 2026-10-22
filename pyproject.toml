@@ -1,0 +1,11 @@
+[build-system]
+requires = []
+build-backend = ""
+
+[project]
+name = "zerodep-doctor"
+version = "0.1.0"
+description = "Zero-dependency static analyzer and stdlib migration assistant"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
